@@ -115,7 +115,7 @@ def get_piece_value(char):
 
 def evaluate_position(fen):
     directory = "/home/karolito/DL/chess/stockfish/stockfish_15.1_linux_x64_bmi2"
-    file_name = "stockfish_15.1_x64_bmi2"
+    file_name = "stockfish_15.1_x64_bmi2" 
     stockfish_path = os.path.join(directory, file_name)
     with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
         board = chess.Board(fen)
