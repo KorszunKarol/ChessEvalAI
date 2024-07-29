@@ -7,11 +7,8 @@ import gc
 
 def load_features_and_labels(dataset):
 
-
-    # Split the dataset into training and test sets
     dataset_train, dataset_test = train_test_split(dataset, test_size=0.05, random_state=42)
 
-    # Access the features and label from the training dataset
     X_train = np.array([element[0] for element in dataset_train])
     y_train = np.array([element[1] for element in dataset_train])
 
@@ -33,7 +30,6 @@ def remove_duplicates(dataset):
             unique_positions.add(position_tuple)
             unique_dataset.append((position, label))
     return unique_dataset
-    # # Save the unique dataset as a new TensorFlow database
     # unique_train_dataset = tf.data.Dataset.from_tensor_slices((X_unique, y_unique))
     # tf.data.experimental.save(unique_train_dataset, f'{save_path}_unique')
 
@@ -41,9 +37,8 @@ def filter_and_sample_labels(dataset, label_to_sample, sample_size):
     filtered_dataset = []
     count_label_to_sample = 0
     for idx, position_with_label in enumerate(dataset):
-        # Extract position and label
-        position = position_with_label[:-1]  # Remove the last element (label)
-        label = position_with_label[-1]      # Extract the last element (label)
+        position = position_with_label[:-1]  
+        label = position_with_label[-1]      
 
         if label == label_to_sample:
             count_label_to_sample += 1
@@ -80,14 +75,12 @@ def serialize_example(input_data, label):
 
 
 def filter_second_to_last_element_equal_to_1(x, y):
-    # Assuming x is your input data and y is the label/target
-    second_to_last = x[:, -2]  # Assuming the second-to-last element is being checked
+    second_to_last = x[:, -2]  
     condition = tf.equal(second_to_last, 1)
     return tf.boolean_mask(x, condition), tf.boolean_mask(y, condition)
 
 
 def main():
-    # Load your data
     y_train = np.load("y_train_big.npy")
     X_train = tf.data.Dataset.load("saved_tf_train").unbatch()
     y_train_unbatched = tf.data.Dataset.from_tensor_slices(y_train)
@@ -112,10 +105,8 @@ def main():
     # tf.data.Dataset.save(ds_1, path="filtered_dataset_1")
     # del ds_1
     # tf.data.Dataset.save(ds_3, path="filtered_dataset_3")
-    print("AAAa")
 
 
     tf.data.Dataset.save(combined_dataset, path="filtered_dataset")
-    print("hey")
 if __name__ == "__main__":
     main()
