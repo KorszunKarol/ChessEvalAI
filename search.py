@@ -1,5 +1,5 @@
 import chess
-from model import preprocess_input, custom_weighted_mse_loss
+from model import preprocess_input, custom_weighted_mse_loss, cast_to_int32
 import tensorflow as tf
 import time
 import multiprocessing
@@ -9,12 +9,16 @@ from tensorflow.keras.utils import custom_object_scope
 from convert_to_bitmap import expand_to_input
 import numpy as np
 from database import convert_fen_to_matrix, get_material_score
-
-
+from temporary import filter_second_to_last_element_equal_to_1
+from tensorflow.keras import mixed_precision
+import os
 
 model = None
 iters = 0
-logging.basicConfig(level=logging.INFO, filename='output.log', filemode='w', format='%(message)s')
+initial_depth = None
+logging.basicConfig(
+    level=logging.INFO, filename="output.log", filemode="w", format="%(message)s"
+)
 
 
 def get_legal_moves(fen):
@@ -23,133 +27,267 @@ def get_legal_moves(fen):
     return moves, board
 
 
-def convert_to_trt_model(input_model_path, output_model_path):
-    # Load the Keras model
-    model = tf.keras.models.load_model(input_model_path)
+def calibration_input_fn():
+    y_test = np.load("y_test_big.npy")
 
-    # Convert the Keras model to a TensorRT optimized model
-    converter = trt.TrtGraphConverterV2(input_saved_model_dir=input_model_path)
-    converter.convert()
-    converter.save(output_model_path)
+    X_test = tf.data.Dataset.load("saved_tf_test")
+    X_test_unbatched = X_test.unbatch()
+    y_test_unbatched = tf.data.Dataset.from_tensor_slices(y_test)
+    test_ds = tf.data.Dataset.zip((X_test_unbatched, y_test_unbatched))
+    test_ds_black = test_ds.filter(filter_second_to_last_element_equal_to_1)
+    test_ds_white = tf.data.Dataset.load("new_test_ds")
+    test_ds_white = test_ds_white.map(lambda x, y: (tf.cast(x, tf.int32), y))
 
-def optimize_for_tensorrt(model):
-    # Convert the Keras model to a TensorRT optimized model
-    converter = trt.TrtGraphConverterV2(input_saved_model_dir=model, use_dynamic_shape=True)
+    test_ds = (
+        test_ds_black.concatenate(test_ds_white)
+        .shuffle(5 * 256)
+        .map(lambda x, y: (tf.cast(x, tf.float32), y))
+    )
+    test_ds = test_ds.map(lambda x, y: (tf.reshape(x, (1, 8, 8, 14))))
+
+    batch_size = 1
+    x = test_ds[0:batch_size, :]
+    yield [x]
+
+
+def calibration_input_fn():
+    X_test = tf.data.Dataset.load("saved_tf_test").take(30)
+    for x in X_test:
+        yield [x]
+
+
+def optimize_for_tensorrt(model, name):
+    converter = trt.TrtGraphConverterV2(
+        input_saved_model_dir=model,
+        precision_mode=trt.TrtPrecisionMode.FP16,
+        use_dynamic_shape=False,
+        max_workspace_size_bytes=10000 * 1024 * 1024 * 1024,
+    )
     converter.convert()
-    converter.save('trt_optimized_model')
+
+    converter.save(name)
+
 
 def load_tensorrt_optimized_model(path):
-    # Load the TensorRT optimized model
-    trt_model = tf.saved_model.load(path)
+
+    assert os.path.exists(path)
+    print("Reading engine from file {}".format(path))
+    with open(path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
+        return runtime.deserialize_cuda_engine(f.read())
+
     return trt_model
 
+
 def predict_with_tensorrt(input_data, trt_model):
-    engine_file = 'tensorrt_model/converted_model.plan'
+    engine_file = "tensorrt_model/converted_model.plan"
     trt_logger = trt.Logger(trt.Logger.WARNING)
-    with open(engine_file, 'rb') as f, trt.Runtime(trt_logger) as runtime:
+    with open(engine_file, "rb") as f, trt.Runtime(trt_logger) as runtime:
         engine = runtime.deserialize_cuda_engine(f.read())
+
 
 def convert_eval_dict(eval):
     if type(eval) == dict:
-        eval = eval["dense_3"]
+        eval = eval["dense_8"]
         eval = eval.numpy()[0, 0]
     return eval
 
-def search(board, depth, alpha, beta, color, model, max_depth=4, current_depth= 0, max_iters=20_000, max_time=20, time_start=0):
+
+def search(
+    board,
+    depth,
+    alpha,
+    beta,
+    color,
+    model,
+    max_depth=3,
+    current_depth=0,
+    max_iters=20_000,
+    max_time=20,
+    time_start=0,
+    move_order_list=[],
+):
     global iters
+    global initial_depth
+    best_moves = []
     position = board.fen()
-
-    if depth == 0 or current_depth > max_depth or max_iters < iters or (time.time() - time_start >= max_time):
+    if (
+        depth == 0
+        or current_depth > max_depth
+        or max_iters < iters
+        or (time.time() - time_start >= max_time)
+    ):
         input = expand_to_input(convert_fen_to_matrix(position))
-        return model(tf.reshape(input, (1, 8, 8, 14))), None
+        return model(tf.reshape(input, (1, 8, 8, 14))), None, None
 
-    moves_list, new_board = get_legal_moves(position)
-    moves_list = order_move_list(moves_list, board)
     best_move = None
     if color:
-        max_eval = float('-inf')
+        value = float("-inf")
+        if len(move_order_list) == 0:
+            moves_list, new_board = get_legal_moves(position)
+            moves_list = order_move_list(moves_list, board)
+        elif current_depth == 0:
+            moves_list = move_order_list
+
         for move in moves_list:
             attacking_piece, attackers, attacks = get_move_info(new_board, move)
             iters += 1
             board_2 = new_board.copy()
             board_2.push(move)
-            if (is_capture(new_board, move) or is_a_blunder(attackers, attacking_piece, board_2) or is_a_threat(attacks, attacking_piece, board_2)) and (current_depth <= max_depth):
+            if (
+                (
+                    (
+                        is_capture(new_board, move)
+                        or is_a_threat(attacks, attacking_piece, board_2)
+                    )
+                    and not is_a_blunder(attackers, attacking_piece, board_2)
+                )
+                and (current_depth < max_depth and current_depth > 0)
+                and max_depth != initial_depth
+            ):
                 new_board.push(move)
-                evaluation, _ = search(new_board, depth, alpha, beta, False, model, current_depth=current_depth + 1, max_depth=max_depth, time_start=time_start, max_time=max_time, max_iters=max_iters)
+                evaluation, _, _ = search(
+                    new_board,
+                    depth,
+                    alpha,
+                    beta,
+                    False,
+                    model,
+                    current_depth=current_depth + 1,
+                    max_depth=max_depth,
+                    time_start=time_start,
+                    max_time=max_time,
+                    max_iters=max_iters,
+                )
                 evaluation = convert_eval_dict(evaluation)
 
             else:
                 new_board.push(move)
-                evaluation, _ = search(new_board, depth - 1, alpha, beta, False, model, current_depth=current_depth + 1, max_depth=max_depth, time_start=time_start, max_time=max_time, max_iters=max_iters)
+                evaluation, _, _ = search(
+                    new_board,
+                    depth - 1,
+                    alpha,
+                    beta,
+                    False,
+                    model,
+                    current_depth=current_depth + 1,
+                    max_depth=max_depth,
+                    time_start=time_start,
+                    max_time=max_time,
+                    max_iters=max_iters,
+                )
                 evaluation = convert_eval_dict(evaluation)
-
-
-            if evaluation > max_eval:
-                max_eval = evaluation
-                best_move = move
-
-            alpha = max(alpha, max_eval)
-            if beta <= alpha:
-                break
 
             new_board.pop()
 
-        return max_eval, best_move
+            if evaluation > value:
+                value = evaluation
+                best_move = move
+            best_moves.append((move, evaluation))
+
+            if value >= beta:
+                break
+            alpha = max(alpha, value)
     else:
-        min_eval = float('inf')
+        value = float("inf")
+        if len(move_order_list) == 0:
+            moves_list, new_board = get_legal_moves(position)
+            moves_list = order_move_list(moves_list, board)
+        elif current_depth == 0:
+            moves_list = move_order_list
+
         for move in moves_list:
             attacking_piece, attackers, attacks = get_move_info(new_board, move)
             iters += 1
             board_2 = new_board.copy()
             board_2.push(move)
 
-            if (is_capture(new_board, move)  or is_a_blunder(attackers, attacking_piece, board_2) or is_a_threat(attacks, attacking_piece, board_2)) and (current_depth <= max_depth):
+            if (
+                (
+                    (
+                        is_capture(new_board, move)
+                        or is_a_threat(attacks, attacking_piece, board_2)
+                    )
+                    and not is_a_blunder(attackers, attacking_piece, board_2)
+                )
+                and (current_depth < max_depth and current_depth > 0)
+                and max_depth != initial_depth
+            ):
                 new_board.push(move)
-                evaluation, _ = search(new_board, depth, alpha, beta, True, model, current_depth=current_depth + 1, max_depth=max_depth , time_start=time_start, max_time=max_time, max_iters=max_iters)
+                evaluation, _, _ = search(
+                    new_board,
+                    depth,
+                    alpha,
+                    beta,
+                    True,
+                    model,
+                    current_depth=current_depth + 1,
+                    max_depth=max_depth,
+                    time_start=time_start,
+                    max_time=max_time,
+                    max_iters=max_iters,
+                )
                 evaluation = convert_eval_dict(evaluation)
 
             else:
                 new_board.push(move)
-                evaluation, _ = search(new_board, depth - 1, alpha, beta, True, model, current_depth=current_depth + 1, max_depth= max_depth, time_start=time_start, max_time=max_time, max_iters=max_iters)
+                evaluation, _, _ = search(
+                    new_board,
+                    depth - 1,
+                    alpha,
+                    beta,
+                    True,
+                    model,
+                    current_depth=current_depth + 1,
+                    max_depth=max_depth,
+                    time_start=time_start,
+                    max_time=max_time,
+                    max_iters=max_iters,
+                )
                 evaluation = convert_eval_dict(evaluation)
-
-
-            if evaluation < min_eval:
-                min_eval = evaluation
-                best_move = move
-
-            beta = min(beta, min_eval)
-            if beta <= alpha:
-                break
 
             new_board.pop()
 
-        print(iters)
-        return min_eval, best_move
+            if evaluation < value:
+                value = evaluation
+                best_move = move
+            best_moves.append((move, evaluation))
+
+            if value <= alpha:
+                break
+            beta = min(beta, value)
+    print(iters)
+    return value, best_move, best_moves
 
 
 def is_capture(board, move):
     return board.is_capture(move)
 
+
 def is_a_threat(attacked_squares_set, piece, board):
-    piece_value = {'P': 100, 'N': 310, 'B': 320, 'R': 500, 'Q': 900}  # Assign values to pieces based on their relative importance
+    piece_value = {"P": 100, "N": 310, "B": 320, "R": 500, "Q": 900}
 
     for square in attacked_squares_set:
         attacked_piece = board.piece_at(square)
 
         if attacked_piece is not None:
-            if piece_value.get(attacked_piece.symbol(), 0) >= piece_value.get(piece.symbol(), 0):
+            if piece_value.get(attacked_piece.symbol(), 0) > piece_value.get(
+                piece.symbol(), 0
+            ):
                 return True
 
     return False
 
+
 def is_a_blunder(attackers, piece, board):
-    piece_value = {'P': 100, 'N': 310, 'B': 320, 'R': 500, 'Q': 900}
+    piece_value = {"P": 100, "N": 310, "B": 320, "R": 500, "Q": 900}
     for square in attackers:
         attacker = board.piece_at(square)
-        if attacker is not None and piece_value.get(attacker.symbol(), 0) < piece_value.get(piece.symbol(), 0):
+        if attacker is not None and piece_value.get(
+            attacker.symbol(), 0
+        ) < piece_value.get(piece.symbol(), 0):
             return True
     return False
+
 
 def order_move_list(move_list, board):
     ordered_list = []
@@ -165,11 +303,11 @@ def order_move_list(move_list, board):
         if board.is_capture(move):
             score += 100
         if board.gives_check(move):
-            score += 300
+            score += 100
         if is_a_threat(attacks, attacking_piece, board):
-            score += 1000
+            score += 100
         if is_a_blunder(attackers, attacking_piece, board):
-            score -= 600
+            score -= 500
         scores.append((score, ix))
     scores.sort(key=lambda x: x[0], reverse=True)
     ordered_list = [move_list[i] for _, i in scores]
@@ -177,18 +315,14 @@ def order_move_list(move_list, board):
     return ordered_list
 
 
-def load_opening_book(path):
-    pass
-
-
 def get_move_info(board, move):
-        color = board.turn
-        start = move.from_square
-        attacking_piece = board.piece_at(start)
-        destination = move.to_square
-        attackers = board.attackers(not color, destination)
-        attacks = board.attacks(destination)
-        return attacking_piece, attackers, attacks
+    color = board.turn
+    start = move.from_square
+    attacking_piece = board.piece_at(start)
+    destination = move.to_square
+    attackers = board.attackers(not color, destination)
+    attacks = board.attacks(destination)
+    return attacking_piece, attackers, attacks
 
 
 def speed_test(model):
@@ -202,57 +336,96 @@ def speed_test(model):
         "r1b1r1k1/1p1nqppp/p7/2pp4/3P4/2P1P1P1/PPQN1P1P/R1B1R1K1 w - - 0 21",
         "r2qkb1r/p1pnpppp/2n2n2/1p6/3PP3/2N2N2/PPP2PPP/R1BQKB1R w KQkq - 0 7",
         "rnb1kb1r/ppp1pppp/8/3p4/3Pn3/5N2/PPP2PPP/R1BQKB1R w KQkq - 0 7",
-        "r1bqkb1r/ppp1pppp/8/3p4/4n3/5N2/PPP2PPP/R1BQKB1R b KQkq - 0 7"
+        "r1bqkb1r/ppp1pppp/8/3p4/4n3/5N2/PPP2PPP/R1BQKB1R b KQkq - 0 7",
     ]
     times = []
     for fen in fen_positions:
-        print("he")
         tic = time.time()
-        model(tf.reshape(preprocess_input(fen), (1, 8, 8, 14)))
+        input = expand_to_input(convert_fen_to_matrix(fen))
+        model(tf.reshape(input, (1, 8, 8, 14)))
         tac = time.time()
         times.append(tac - tic)
     return times
 
 
+def iterative_deepening_search(
+    board, model, max_depth=3, max_time=200, max_iters=200_000
+):
+    global iters
+    global initial_depth
+
+    color = board.turn
+    best_move = None
+    best_evaluation = float("-inf")
+    best_move_list = []
+
+    time_start = time.time()
+    for depth in range(1, max_depth + 1):
+        print("hey")
+        evaluation, move, best_move_list = search(
+            board,
+            depth=depth,
+            alpha=float("-inf"),
+            beta=float("inf"),
+            color=color,
+            model=model,
+            max_depth=depth,
+            max_iters=100000,
+            max_time=max_time,
+            move_order_list=best_move_list,
+            current_depth=0,
+            time_start=time_start,
+        )
+        print("hey")
+        print(evaluation)
+        print(move)
+        print(best_move_list)
+        eval_prev = evaluation
+        move_prev = move
+        best_move_list = sorted(
+            best_move_list, key=lambda x: x[1], reverse=True if color else False
+        )
+        best_move_list = list(map(lambda x: x[0], best_move_list))
+        print(best_move_list)
+
+        if time.time() - time_start >= max_time:
+            break
+    return eval_prev, move_prev, best_move_list
+
+
 def main():
-    # tf.keras.utils.get_custom_objects()['custom_weighted_mse_loss'] = custom_weighted_mse_loss
-    # model = tf.keras.models.load_model("model_model.model")
-    # optimize_for_tensorrt("model_model.model")
-    trt_model = load_tensorrt_optimized_model("trt_optimized_model")
 
-
-
-
+    trt_model = tf.saved_model.load("model_trt")
     signature_keys = list(trt_model.signatures.keys())
-
     graph_func = trt_model.signatures[signature_keys[0]]
 
-
-
-    position = "N1bk3r/pp2bppp/2n5/3p4/2n5/P7/1PPP1PPP/R1B1K1NR w KQ - 0 11"
+    position = "r2qk2r/pp2bpp1/2P1pn2/1B4p1/8/3P1Q1P/PP3PP1/RN2R1K1 b kq - 0 13"
     input = convert_fen_to_matrix(position)
 
     input = expand_to_input(input)
-    input - tf.reshape(input, (8, 8, 14))
+    input - tf.reshape(input, (1, 8, 8, 14))
     print(input)
-    return
+    initital_pred = graph_func(tf.reshape(input, (1, 8, 8, 14)))
 
-    initial_pred = graph_func(tf.reshape(input, (1, 8, 8, 14)))
-    # times = speed_test(graph_func)
-    # times.pop(0)
-    # print(times)
-    # average_time = tf.reduce_mean(times)
-    # print(average_time * 200_000 / 60)
     board = chess.Board(position)
     color = board.turn
     tic = time.time()
-    print("hey")
-    move = search(board=board, depth=2, alpha=float('-inf'), beta= float("inf"), color=color, model=graph_func, max_depth=4, current_depth=0, max_iters=30_000, max_time=300, time_start=tic)
-    tac = time.time()
-    print(f"Measured time: {tac - tic}")
-    print(move)
-    print(iters)
-    print(initial_pred)
+    evaluation, best_move, move_list = search(
+        board=board,
+        depth=3,
+        alpha=float("-inf"),
+        beta=float("inf"),
+        color=color,
+        model=graph_func,
+        max_depth=3,
+        current_depth=0,
+        max_iters=300_000,
+        max_time=300000,
+        time_start=tic,
+    )
+    print(sorted(move_list, key=lambda x: x[1], reverse=True if color else False))
+
+    return
 
 
 if __name__ == "__main__":
