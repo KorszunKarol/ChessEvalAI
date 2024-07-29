@@ -27,11 +27,9 @@ def expand_to_input(input_vector):
             col = i % 8
             chessboard[row, col, channel_index] = 1.0
 
-    # Extract whose turn it is (65th element)
     turn = input_vector[64]
     turn_matrix = np.ones((8, 8), dtype=np.float32) * turn
 
-    # Extract the material score (last element)
     material_score = input_vector[-1]
     material_matrix = np.ones((8, 8), dtype=np.float32) * material_score
     input_tensor = np.dstack((chessboard, turn_matrix, material_matrix))
@@ -58,7 +56,6 @@ def create_dataset(data, batch_size=512):
 
 
 def dataset_to_numpy(dataset):
-    # Collect samples from the dataset
     X = []
     y = []
     for i, j in dataset:
@@ -70,7 +67,6 @@ def dataset_to_numpy(dataset):
 
 
 def convert_to_int32(element):
-    # Assuming element is a tensor or a NumPy array
     return tf.cast(element, tf.int32)
 
 
@@ -81,7 +77,6 @@ def main():
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
-            # Restrict TensorFlow to only allocate memory as needed
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
             logical_gpus = tf.config.experimental.list_logical_devices('GPU')
@@ -116,15 +111,13 @@ def main():
 
     X_test = X_test.concatenate(tf_test)
     del tf_test
-    print("damn")
     options = tf.data.Options()
 
     save_options = tf.saved_model.SaveOptions(experimental_io_device='/job:localhost')
 
     ds = np.load("y_train_big.npy")
     print(len(ds))
-    # for i in ds:
-    #     print(i)
+
 
 
 if __name__ == "__main__":
