@@ -254,3 +254,53 @@ def game_phase(board):
     phase = np.full((8, 8), phase, dtype=np.float32)
 
     return phase
+
+
+def king_safety(board):
+    safety = np.zeros((8, 8, 2), dtype=np.float32)  # [0] White, [1] Black
+
+    def evaluate_king_safety(color):
+        king_square = board.king(color)
+        if king_square is None:
+            return np.zeros((8, 8), dtype=np.float32)
+
+        king_file, king_rank = chess.square_file(king_square), chess.square_rank(king_square)
+        safety_score = 0
+
+        # Pawn shield
+        pawn_shield_squares = [
+            (king_file - 1, king_rank + (1 if color == chess.WHITE else -1)),
+            (king_file, king_rank + (1 if color == chess.WHITE else -1)),
+            (king_file + 1, king_rank + (1 if color == chess.WHITE else -1))
+        ]
+        for file, rank in pawn_shield_squares:
+            if 0 <= file < 8 and 0 <= rank < 8:
+                square = chess.square(file, rank)
+                if board.piece_at(square) == chess.Piece(chess.PAWN, color):
+                    safety_score += 0.2
+
+        # Open files near the king
+        nearby_files = [f for f in range(max(0, king_file - 1), min(8, king_file + 2))]
+        for file in nearby_files:
+            if not any(board.piece_at(chess.square(file, r)) == chess.Piece(chess.PAWN, color) for r in range(8)):
+                safety_score -= 0.15
+
+        # Attacking pieces
+        opponent_color = not color
+        attack_weight = {chess.PAWN: 0.1, chess.KNIGHT: 0.2, chess.BISHOP: 0.2,
+                         chess.ROOK: 0.3, chess.QUEEN: 0.5}
+
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece and piece.color == opponent_color:
+                if board.is_attacked_by(opponent_color, king_square):
+                    safety_score -= attack_weight.get(piece.piece_type, 0.1)
+
+        # Normalize safety score
+        safety_score = max(-1, min(1, safety_score))
+        return np.full((8, 8), safety_score, dtype=np.float32)
+
+    safety[:, :, 0] = evaluate_king_safety(chess.WHITE)
+    safety[:, :, 1] = evaluate_king_safety(chess.BLACK)
+
+    return safety

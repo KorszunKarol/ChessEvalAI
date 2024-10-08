@@ -16,7 +16,7 @@ class PGNProcessor:
     chunk_size: int = 1_000_000_000
     progress_file: str = field(init=False)
     file_size: int = field(init=False)
-    min_move_number: int = 8 
+    min_move_number: int = 8
 
     def __post_init__(self):
         self.progress_file = os.path.join(os.path.dirname(self.pgn_file_path), 'progress.txt')
@@ -64,7 +64,7 @@ class PGNProcessor:
                 self.save_progress(start_pos)
 
     def convert_fen_to_matrix(self, fen: str) -> np.ndarray:
-        matrix = np.zeros((8, 8, 60), dtype=np.float32)  # Updated to 60 channels
+        matrix = np.zeros((8, 8, 34), dtype=np.float32)
         board = chess.Board(fen)
         piece_to_index = {
             'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
@@ -112,24 +112,27 @@ class PGNProcessor:
         matrix[:, :, 23] = isolated
         matrix[:, :, 24] = passed
 
-        # Center control (channel 26)
-        matrix[:, :, 26] = center_control(board)
+        # Center control (channel 25)
+        matrix[:, :, 25] = center_control(board)
 
-        # Piece-square tables (channel 27)
-        matrix[:, :, 27] = piece_square_tables(board)
+        # Piece-square tables (channel 26)
+        matrix[:, :, 26] = piece_square_tables(board)
 
-        # Defended and Vulnerable (channels 29-30)
+        # Defended and Vulnerable (channels 27-30)
         defended, vulnerable = defended_and_vulnerable(board)
-        matrix[:, :, 29] = defended[:, :, 0]  # White
-        matrix[:, :, 30] = defended[:, :, 1]  # Black
-        matrix[:, :, 31] = vulnerable[:, :, 0]  # White
-        matrix[:, :, 32] = vulnerable[:, :, 1]  # Black
+        matrix[:, :, 27] = defended[:, :, 0]  # White
+        matrix[:, :, 28] = defended[:, :, 1]  # Black
+        matrix[:, :, 29] = vulnerable[:, :, 0]  # White
+        matrix[:, :, 30] = vulnerable[:, :, 1]  # Black
 
-        # Piece Coordination (channel 33)
-        matrix[:, :, 33] = piece_coordination(board)
+        # Piece Coordination (channel 31)
+        matrix[:, :, 31] = piece_coordination(board)
 
-        # Game Phase (channel 59)
-        matrix[:, :, 59] = game_phase(board)
+        # Game Phase (channel 32)
+        matrix[:, :, 32] = game_phase(board)
+
+        # King safety (channel 33)
+        matrix[:, :, 33] = king_safety(board)
 
         return matrix
 
