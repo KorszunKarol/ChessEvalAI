@@ -1,0 +1,83 @@
+# Directories
+.vscode/
+__pycache__/
+logs/
+ChessEvalAI/
+Lichess_Elite_Database/
+18.12.New_data_600k/
+big_dataset/
+concat_X_test/
+dataset_nice/
+dataset_nice_1/
+filtered_dataset/
+fixed_whites/
+fixed_whites_2/
+h5_model/
+keras_model/
+merged_dataset/
+merged_model_with_optimized_layers/
+model.model/
+model_6.model/
+model_best/
+model_trt/
+modelito.model/
+new_test_ds/
+part1_model/
+part2_model/
+part3_model/
+part_1/
+saved_model/
+saved_tf_test/
+saved_tf_train/
+stockfish/
+tests/
+trt_optimized_model/
+X_test_tf/
+# Ignore the large snapshot file
+X_test_tf/17486231143911828874/00000000.shard/00000000.snapshot
+# Data files
+*.snapshot
+*.shard
+*.npy
+*.txt
+*.png
+*.pem
+*.tflite
+*.h5
+*.weights.h5
+*.model
+*.log
+*.pb
+*.pbtxt
+*.pkl
+*.pickle
+*.pkl
+*.pickle
+*.pkl
+*.pickle
+*.pkl
+*.pickle
+
+
+
+# Specific files
+conv2d_0.tflite
+conv2d_1_1.tflite
+conv2d_2_2.tflite
+conv2d_3_3.tflite
+conv2d_4_4.tflite
+convert_to_onnx.py
+mcts.py
+pls_work.py
+test_model.py
+testing.py
+transposition_table.py
+
+# Keep these files (remove the # if you want to track them)
+# !model.py
+# !temporary.pyX_test_tf/
+X_test_tf/
+
+tf_env/
+pypy_env/
+preprocessed_data/
